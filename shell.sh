@@ -7,64 +7,9 @@ MARKDOWN_COMMANDS_FILE=$1
 
 # Picker records: command + US (\037) + display text + NULL (\0).
 # Command lines have two-space display padding, removed before insertion.
-_markdown_history() {
-    if [[ -n ${BASH_VERSION:-} ]]; then
-        # Compare plain and marked snapshots: only real entry headers change,
-        # even if a command contains "  123  literal". Missing timestamps get ??.
-        # The third snapshot preserves the user timestamp format for display.
-        {
-            HISTTIMEFORMAT= builtin history
-            printf '\0'
-            HISTTIMEFORMAT=MARKER builtin history
-            printf '\0'
-            builtin history
-            printf '\0'
-        } | awk -v RS='\0' '
-            # Each NULL-delimited record is a snapshot, with a final newline.
-            NR == 1 { count = split($0, plain, "\n") - 1 }
-            NR == 2 { split($0, marked, "\n") }
-            NR == 3 {
-                split($0, formatted, "\n")
-                for (line = 1; line <= count; line++) {
-                    if (plain[line] != marked[line]) {
-                        n++
-                        sub(/^ *[0-9]+[ *] /, "", plain[line])
-                        sub(/^ *[0-9]+[ *] /, "", formatted[line])
-                        commands[n] = plain[line]
-                        displays[n] = formatted[line]
-                    } else {
-                        commands[n] = commands[n] "\n" plain[line]
-                        displays[n] = displays[n] "\n" formatted[line]
-                    }
-                }
-            }
-            END {
-                for (i = n; i > 0; i--) {
-                    command = commands[i]
-                    # The display prefix is the timestamp, the suffix is the command.
-                    stamp = substr(displays[i], 1, length(displays[i]) - length(command))
-                    sub(/[ \t]+$/, "", stamp)
-                    command = "  " command
-                    gsub(/\n/, "\n  ", command)
-                    display = stamp == "" ? command : stamp "  " substr(command, 3)
-                    printf "%s\037%s%c", command, display, 0
-                }
-            }
-        '
-    else
-        local id command
-        for id in ${(Onk)history}; do
-            command=${history[$id]}
-            command=${command//$'\n'/$'\n  '}
-            printf '  %s\037  %s\0' "$command" "$command"
-        done
-    fi
-}
 _markdown_commands() {
     local selected
-    selected=$({ _markdown_history
-        awk -v RS='\0' '{ sub(/\n$/, ""); printf "%s\037%s%c", $0, $0, 0 }' "$MARKDOWN_COMMANDS_FILE"
-    } |
+    selected=$(awk -v RS='\0' '{ sub(/\n$/, ""); printf "%s\037%s%c", $0, $0, 0 }' "$MARKDOWN_COMMANDS_FILE" |
         FZF_DEFAULT_OPTS= FZF_DEFAULT_OPTS_FILE= fzf --read0 --no-multi \
             --delimiter=$'\037' --with-nth=2.. \
             --layout=default --height=80% --gap --tiebreak=index \
@@ -82,10 +27,40 @@ _markdown_commands() {
         zle redisplay
     fi
 }
-if [[ -n ${BASH_VERSION:-} ]]; then
-    bind -m emacs-standard -x '"\C-r":_markdown_commands'
-else
-    zmodload zsh/parameter
-    zle -N _markdown_commands
-    bindkey -M emacs '^R' _markdown_commands
-fi
+
+_markdown_bind_key() {
+    local key=${MARKDOWN_TO_FZF_KEY:-Alt+m}
+    local letter bash_sequence zsh_sequence
+
+    case $key in
+        none) return 0 ;;
+        Alt+[a-z])
+            letter=${key#Alt+}
+            bash_sequence="\\e$letter"
+            zsh_sequence="^[$letter"
+            ;;
+        Ctrl+[a-z])
+            letter=${key#Ctrl+}
+            bash_sequence="\\C-$letter"
+            zsh_sequence="^$letter"
+            ;;
+        *)
+            printf 'markdown_to_fzf: unsupported key %s (use Alt+<letter>, Ctrl+<letter>, or none)\n' "$key" >&2
+            return 1
+            ;;
+    esac
+
+    if [[ -n ${BASH_VERSION:-} ]]; then
+        # Retain Readline binding as a fallback if Flyline is disabled later.
+        bind -m emacs-standard -x "\"$bash_sequence\":_markdown_commands"
+        # Flyline replaces Readline and needs its own registration.
+        if [[ $(type -t flyline 2>/dev/null) == builtin ]]; then
+            flyline key bind "$key" 'always=runBashCommand(_markdown_commands)'
+        fi
+    else
+        zle -N _markdown_commands
+        bindkey -M emacs "$zsh_sequence" _markdown_commands
+    fi
+}
+_markdown_bind_key || { unset -f _markdown_bind_key; return 1; }
+unset -f _markdown_bind_key
